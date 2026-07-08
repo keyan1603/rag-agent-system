@@ -40,10 +40,11 @@ cd rag-agent-system
 
 # Create Python virtual environment
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
+python main.py
 
 # Set up environment
 cp .env.example .env

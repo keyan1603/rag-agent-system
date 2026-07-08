@@ -16,6 +16,7 @@ Example request:
 """
 
 import os
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional
@@ -24,6 +25,9 @@ from knowledge_base import KNOWLEDGE_BASE
 from retriever import RAGRetriever
 from agent import RAGAgentWithLoop
 from tools import tool_registry
+
+
+load_dotenv()
 
 
 # ============================================================================
@@ -117,9 +121,9 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             request.query,
             max_iterations=request.max_iterations
         )
-        
-        # Clear history after each query
-        agent.clear_history()
+        # Preserve conversation history by default so follow-up HTTP requests
+        # can continue the same session. If you want per-request isolation,
+        # call `agent.clear_history()` explicitly or enable it via a flag.
         
         return QueryResponse(
             query=request.query,
