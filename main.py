@@ -12,10 +12,15 @@ Or for interactive mode:
 
 import sys
 import os
+from dotenv import load_dotenv
+
 from knowledge_base import KNOWLEDGE_BASE
 from retriever import RAGRetriever
 from tools import tool_registry
 from agent import RAGAgentWithLoop
+
+
+load_dotenv()
 
 
 def main():
@@ -34,6 +39,8 @@ def main():
         print("   export GEMINI_API_KEY=your_api_key_here")
         print("\nThen run this script again.")
         sys.exit(1)
+    else:
+        print(f"Debug: GEMINI_API_KEY={os.getenv('GEMINI_API_KEY')}")
     
     # Initialize components
     print("\n🔧 Initializing...")
@@ -54,7 +61,7 @@ def main():
     print("="*70)
     print("\nExamples of questions you can ask:")
     print("  - 'I need to deploy version 2.5.0. What should I do?'")
-    print("  - 'Deploy to staging and verify it works'")
+    print("  - 'Deploy to staging version 2.5.0 and verify it works'")
     print("  - 'What should I check before deploying?'")
     print("  - 'What do I do if deployment fails?'")
     print("\nType 'exit' to quit\n")
@@ -73,8 +80,9 @@ def main():
             # Run agent
             result = agent.run(query)
             
-            # Clear history for next query
-            agent.clear_history()
+            # Keep conversation history by default so subsequent turns remember
+            # previous context. Remove the following line if you want per-query
+            # isolation: agent.clear_history()
             
         except KeyboardInterrupt:
             print("\n\nInterrupted. Goodbye! 👋\n")

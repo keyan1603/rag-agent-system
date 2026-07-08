@@ -13,7 +13,11 @@ The agent:
 
 import os
 from typing import List, Dict, Any, Optional
+from dotenv import load_dotenv
 import google.genai as genai
+
+
+load_dotenv()
 
 
 class RAGAgentWithLoop:
@@ -90,32 +94,56 @@ class RAGAgentWithLoop:
         for tool_name, tool_info in self.tool_registry.items():
             schema = tool_info["input_schema"].model_json_schema()
             
-            # Convert Pydantic schema to Gemini format
+            # Convert Pydantic schema to Gemini function declaration format
             properties_dict = {}
             for prop, details in schema.get("properties", {}).items():
-                p_type = "string" if details.get("type") == "string" else "number"
-                if details.get("type") == "boolean":
-                    p_type = "boolean"
+                detail_type = details.get("type")
+                if detail_type == "boolean":
+                    p_type = "BOOLEAN"
+                elif detail_type == "integer":
+                    p_type = "INTEGER"
+                elif detail_type == "number":
+                    p_type = "NUMBER"
+                elif detail_type == "array":
+                    p_type = "ARRAY"
+                elif detail_type == "object":
+                    p_type = "OBJECT"
+                else:
+                    p_type = "STRING"
                 
-                properties_dict[prop] = {
+                property_schema = {
                     "type": p_type,
                     "description": details.get("description", "")
                 }
+                
+                if detail_type == "array":
+                    items_type = details.get("items", {}).get("type", "string")
+                    if items_type == "boolean":
+                        items_type = "BOOLEAN"
+                    elif items_type == "integer":
+                        items_type = "INTEGER"
+                    elif items_type == "number":
+                        items_type = "NUMBER"
+                    elif items_type == "array":
+                        items_type = "ARRAY"
+                    elif items_type == "object":
+                        items_type = "OBJECT"
+                    else:
+                        items_type = "STRING"
+                    property_schema["items"] = {"type": items_type}
+                
+                properties_dict[prop] = property_schema
             
-            # Create tool definition
-            tool_def = {
-                "type": "function",
-                "function": {
-                    "name": tool_name,
-                    "description": tool_info["description"],
-                    "parameters": {
-                        "type": "object",
-                        "properties": properties_dict,
-                        "required": schema.get("required", [])
-                    }
+            function_decl = genai.types.FunctionDeclaration(
+                name=tool_name,
+                description=tool_info["description"],
+                parameters={
+                    "type": "OBJECT",
+                    "properties": properties_dict,
+                    "required": schema.get("required", [])
                 }
-            }
-            tools.append(tool_def)
+            )
+            tools.append(genai.types.Tool(functionDeclarations=[function_decl]))
         
         return tools
     
@@ -163,12 +191,21 @@ Be conversational but precise. Always follow the documented procedures.
 If something goes wrong, suggest remediation steps based on the documentation."""
 
         # Build messages for new API format
-        self.conversation_history = [
-            {
-                "role": "user",
-                "content": system_prompt + "\n\nUser Query: " + user_query
-            }
-        ]
+        # Preserve previous conversation history by default. Only seed the system
+        # prompt once when history is empty so multi-turn conversations persist.
+        if not self.conversation_history:
+            # use 'model' internally (will be mapped to Gemini's MODEL role)
+            self.conversation_history = [
+                {
+                    "role": "model",
+                    "content": system_prompt
+                }
+            ]
+        # Append the new user query as the next turn
+        self.conversation_history.append({
+            "role": "user",
+            "content": user_query
+        })
         
         # Get tool declarations
         tools = self._create_tool_declarations()
@@ -183,13 +220,25 @@ If something goes wrong, suggest remediation steps based on the documentation.""
             
             # Call Gemini API with tools
             try:
+                contents = []
+                # Build Content objects and normalize roles to Gemini's expected literals
+                for message in self.conversation_history:
+                    role_literal = message.get("role", "user").upper()
+                    if role_literal not in ("USER", "MODEL"):
+                        role_literal = "USER"
+                    contents.append(
+                        genai.types.Content(
+                            role=role_literal,
+                            parts=[genai.types.Part(text=message["content"])]
+                        )
+                    )
                 response = self.client.models.generate_content(
                     model="gemini-2.5-flash",
-                    contents=self.conversation_history,
-                    tools=tools,
+                    contents=contents,
                     config={
                         "temperature": 0.7,
-                        "max_output_tokens": 2048
+                        "max_output_tokens": 2048,
+                        "tools": tools
                     }
                 )
             except Exception as e:
@@ -197,54 +246,61 @@ If something goes wrong, suggest remediation steps based on the documentation.""
                 print("   Make sure GEMINI_API_KEY is set correctly")
                 return f"Error occurred during agent execution: {str(e)}"
             
-            # Extract response content
+            # Extract response content and tool calls
             response_text = ""
-            if response.content:
-                response_text = response.content
+            tool_called = False
+            tool_results = []
+            candidate = None
+            if getattr(response, "candidates", None):
+                candidate = response.candidates[0]
+                content = getattr(candidate, "content", None)
+                if content and getattr(content, "parts", None):
+                    text_parts = []
+                    for part in content.parts:
+                        if getattr(part, "function_call", None):
+                            tool_called = True
+                            tool_call = part.function_call
+                            tool_name = tool_call.name
+                            args = tool_call.args or {}
+                            
+                            print(f"🔧 Tool Call: {tool_name}")
+                            print(f"   Parameters: {args}")
+                            
+                            # Execute the tool
+                            try:
+                                if tool_name in self.tool_registry:
+                                    input_schema = self.tool_registry[tool_name]["input_schema"]
+                                    validated_input = input_schema(**args)
+                                    tool_function = self.tool_registry[tool_name]["function"]
+                                    result = tool_function(**validated_input.model_dump())
+                                    
+                                    print(f"   ✓ Result: {result}")
+                                    tool_results.append({
+                                        "tool_name": tool_name,
+                                        "result": result
+                                    })
+                                else:
+                                    raise ValueError(f"Unknown tool: {tool_name}")
+                            except Exception as e:
+                                print(f"   ✗ Error: {e}")
+                                tool_results.append({
+                                    "tool_name": tool_name,
+                                    "result": f"Error: {str(e)}"
+                                })
+                        elif getattr(part, "text", None):
+                            text_parts.append(part.text)
+                    response_text = "\n".join(text_parts).strip()
+                else:
+                    response_text = getattr(candidate, "content", "") or ""
+            else:
+                response_text = getattr(response, "text", "") or ""
             
             # Add model response to history
             self.conversation_history.append({
                 "role": "model",
                 "content": response_text
             })
-            
-            # Check if model called tools
-            tool_called = False
-            tool_results = []
-            
-            # The new google-genai API includes tool calls differently
-            # Check response structure for tool invocations
-            if hasattr(response, 'tool_calls') and response.tool_calls:
-                for tool_call in response.tool_calls:
-                    tool_called = True
-                    tool_name = tool_call.name
-                    args = tool_call.args
-                    
-                    print(f"🔧 Tool Call: {tool_name}")
-                    print(f"   Parameters: {args}")
-                    
-                    # Execute the tool
-                    try:
-                        if tool_name in self.tool_registry:
-                            input_schema = self.tool_registry[tool_name]["input_schema"]
-                            validated_input = input_schema(**args)
-                            tool_function = self.tool_registry[tool_name]["function"]
-                            result = tool_function(**validated_input.model_dump())
-                            
-                            print(f"   ✓ Result: {result}")
-                            tool_results.append({
-                                "tool_name": tool_name,
-                                "result": result
-                            })
-                        else:
-                            raise ValueError(f"Unknown tool: {tool_name}")
-                    except Exception as e:
-                        print(f"   ✗ Error: {e}")
-                        tool_results.append({
-                            "tool_name": tool_name,
-                            "result": f"Error: {str(e)}"
-                        })
-            
+
             # If no tool was called, model has the final answer
             if not tool_called:
                 print(f"\n✅ Agent Finished")
